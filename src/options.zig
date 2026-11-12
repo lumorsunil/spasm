@@ -9,29 +9,29 @@ pub const Options = struct {
     pub const Result = union(enum) {
         err: Options,
         success: ValidatedOptions,
+
+        pub fn fromArgs(allocator: Allocator, args: std.process.Args) @This() {
+            var options: Options = .{};
+
+            var it = try args.iterateAllocator(allocator);
+            _ = it.next();
+            const ctx: ParseContext = .{
+                .allocator = allocator,
+                .args = &it,
+            };
+            options.parseArgs(ctx) catch |err| {
+                options.err = err;
+                return .{ .err = options };
+            };
+
+            const validated_options = options.validate(allocator) catch |err| {
+                options.err = err;
+                return .{ .err = options };
+            };
+
+            return .{ .success = validated_options };
+        }
     };
-
-    pub fn fromArgs(allocator: Allocator, args: std.process.Args) Result {
-        var options: Options = .{};
-
-        var it = try args.iterateAllocator(allocator);
-        _ = it.next();
-        const ctx: ParseContext = .{
-            .allocator = allocator,
-            .args = &it,
-        };
-        options.parseArgs(ctx) catch |err| {
-            options.err = err;
-            return .{ .err = options };
-        };
-
-        const validated_options = options.validate(allocator) catch |err| {
-            options.err = err;
-            return .{ .err = options };
-        };
-
-        return .{ .success = validated_options };
-    }
 
     fn parseArgs(self: *@This(), ctx: ParseContext) Error!void {
         while (ctx.args.next()) |arg| try self.parseArg(ctx, arg);
