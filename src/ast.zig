@@ -16,7 +16,24 @@ pub const Node = struct {
         label: []const u8,
     };
 
-    pub const Instruction = struct {};
+    pub const Instruction = union(enum) {
+        lda_immediate: struct {
+            value: ExprU8,
+            pub const mnemonic = "lda";
+            pub const opcode = 0xA9;
+        },
+    };
+
+    pub const ExprU8 = union(enum) {
+        literal: u8,
+
+        pub fn evaluate(self: @This(), ctx: *CompilationContext) !u8 {
+            _ = ctx;
+            return switch (self) {
+                .literal => |s| s,
+            };
+        }
+    };
 
     pub const Emit = struct {
         node: Id,
@@ -45,16 +62,54 @@ pub const Node = struct {
 };
 
 pub const CompilationContext = struct {
+    io: std.Io,
     allocator: Allocator,
+    node_map: std.AutoHashMapUnmanaged(Node.Id, Node) = .empty,
+    binary_file_map: std.StringHashMapUnmanaged(BinaryOutput) = .empty,
+    label_map: std.AutoHashMapUnmanaged(Node.Id, usize) = .empty,
+    output_file: ?[]const u8 = null,
+
+    pub fn getNodeById(self: *@This(), id: Node.Id) ?Node {
+        return self.node_map.get(id);
+    }
+
+    pub fn appendBinaryOutput(self: *@This(), output_node: BinaryOutput.OutputNode) !void {
+        const output_file = self.output_file orelse return CompileError.EmitWhileNoOutputFile;
+        const binary_file_output = self.binary_file_map.getPtr(output_file) orelse return CompileError.BinaryOutputFileNotFound;
+        try binary_file_output.nodes.append(self.allocator, output_node);
+    }
+
+    pub const BinaryOutput = struct {
+        nodes: std.ArrayList(OutputNode) = .empty,
+
+        pub const empty = @This(){};
+
+        pub const OutputNode = union(enum) {
+            instruction: Node.Instruction,
+            bytes: []const u8,
+        };
+    };
 };
 
 pub const CompileAction = union(enum) {
-    create_binary_file: Node.Id,
+    virtual: Virtual,
+    create_binary_file: CreateBinaryFile,
+
+    pub const Virtual = struct {
+        node: Node.Id,
+    };
+
+    pub const CreateBinaryFile = struct {
+        node: Node.Id,
+        file_path: []const u8,
+    };
 };
 
 pub const CompilationResult = struct {
-    actions: std.ArrayList(CompileAction),
-    diagnostics: std.ArrayList(Diagnostic),
+    actions: std.ArrayList(CompileAction) = .empty,
+    diagnostics: std.ArrayList(Diagnostic) = .empty,
+
+    pub const empty = @This(){};
 
     pub fn init(
         allocator: Allocator,
@@ -62,8 +117,8 @@ pub const CompilationResult = struct {
         diagnostics: []const Diagnostic,
     ) !@This() {
         return .{
-            .actions = .fromOwnedSlice(try allocator.dupe(actions)),
-            .diagnostics = .fromOwnedSlice(try allocator.dupe(diagnostics)),
+            .actions = .fromOwnedSlice(try allocator.dupe(CompileAction, actions)),
+            .diagnostics = .fromOwnedSlice(try allocator.dupe(Diagnostic, diagnostics)),
         };
     }
 
@@ -72,10 +127,56 @@ pub const CompilationResult = struct {
         allocator: Allocator,
         other: CompilationResult,
     ) !void {
-        try self.actions.appendSlice(allocator, other.actions);
-        try self.diagnostics.appendSlice(allocator, other.diagnostics);
+        try self.actions.appendSlice(allocator, other.actions.items);
+        try self.diagnostics.appendSlice(allocator, other.diagnostics.items);
     }
 };
+
+pub fn precompile(
+    ctx: *CompilationContext,
+    node_id: Node.Id,
+) CompileError!CompilationResult {
+    const node = ctx.getNodeById(node_id) orelse return CompileError.NodeNotFound;
+
+    return switch (node.type) {
+        .binary => |binary| precompileBinary(ctx, node, binary),
+        .block => |block| precompileBlock(ctx, node, block),
+        .instruction, .identifier, .emit, .label => .empty,
+    };
+}
+
+pub fn precompileBlock(
+    ctx: *CompilationContext,
+    _: Node,
+    block: Node.Block,
+) CompileError!CompilationResult {
+    var result: CompilationResult = .empty;
+
+    for (block.children) |child| {
+        try result.merge(ctx.allocator, try precompile(ctx, child));
+    }
+
+    return result;
+}
+
+pub fn precompileBinary(
+    ctx: *CompilationContext,
+    node: Node,
+    binary: Node.Binary,
+) CompileError!CompilationResult {
+    return switch (binary.target) {
+        .virtual => try .init(
+            ctx.allocator,
+            &.{.{ .virtual = .{ .node = node.id } }},
+            &.{},
+        ),
+        .file => |file_path| try .init(
+            ctx.allocator,
+            &.{.{ .create_binary_file = .{ .node = node.id, .file_path = file_path } }},
+            &.{},
+        ),
+    };
+}
 
 pub fn compile(
     ctx: *CompilationContext,
@@ -86,17 +187,17 @@ pub fn compile(
     return switch (node.type) {
         .binary => |binary| compileBinary(ctx, node, binary),
         .block => |block| compileBlock(ctx, node, block),
+        .instruction => |instr| compileInstruction(ctx, node, instr),
+        .emit, .identifier, .label => CompileError.NotYetImplemented,
     };
 }
 
 pub fn compileBinary(
     ctx: *CompilationContext,
-    node: Node,
+    _: Node,
     binary: Node.Binary,
 ) CompileError!CompilationResult {
-    const result = try compile(ctx, binary.node);
-
-    try result.actions.append(ctx.allocator, .{ .create_binary_file = node.id });
+    return try compile(ctx, binary.node);
 }
 
 pub fn compileBlock(
@@ -104,18 +205,31 @@ pub fn compileBlock(
     _: Node,
     block: Node.Block,
 ) CompileError!CompilationResult {
-    var result = CompilationResult.init();
+    var result: CompilationResult = .empty;
 
     for (block.children) |child| {
-        try result.merge(try compile(ctx, child));
+        try result.merge(ctx.allocator, try compile(ctx, child));
     }
 
     return result;
 }
 
+pub fn compileInstruction(
+    ctx: *CompilationContext,
+    _: Node,
+    instr: Node.Instruction,
+) CompileError!CompilationResult {
+    // TODO: convert this error to diagnostic
+    try ctx.appendBinaryOutput(.{ .instruction = instr });
+    return .empty;
+}
+
 pub const CompileError = error{
     NodeNotFound,
-};
+    NotYetImplemented,
+    EmitWhileNoOutputFile,
+    BinaryOutputFileNotFound,
+} || std.mem.Allocator.Error;
 
 pub const Diagnostic = struct {
     severity: Severity,
@@ -136,3 +250,80 @@ pub const Range = struct {
     start: Location,
     end: Location,
 };
+
+pub fn writeBinaryOutput(
+    ctx: *CompilationContext,
+    binary_output: *CompilationContext.BinaryOutput,
+    writer: *std.Io.Writer,
+) !void {
+    for (binary_output.nodes.items) |output_node| {
+        switch (output_node) {
+            .bytes => |bytes| try writer.writeAll(bytes),
+            .instruction => |instr| {
+                switch (instr) {
+                    .lda_immediate => |lda_immediate| {
+                        try writer.writeByte(@TypeOf(lda_immediate).opcode);
+                        try writer.writeByte(try lda_immediate.value.evaluate(ctx));
+                    },
+                }
+            },
+        }
+
+        try writer.flush();
+    }
+}
+
+pub fn executeCompilerActions(
+    ctx: *CompilationContext,
+    result: CompilationResult,
+) ExecuteError!void {
+    for (result.actions.items) |action| {
+        if (action != .virtual) continue;
+        try executeVirtual(ctx, action.virtual);
+    }
+
+    for (result.actions.items) |action| {
+        if (action != .create_binary_file) continue;
+        try executeCreateBinaryFile(ctx, action.create_binary_file);
+    }
+}
+
+pub fn executeVirtual(
+    ctx: *CompilationContext,
+    action: CompileAction.Virtual,
+) ExecuteError!void {
+    ctx.output_file = null;
+    // TODO: check diagnostics of result
+    _ = try compile(ctx, action.node);
+}
+
+pub fn executeCreateBinaryFile(
+    ctx: *CompilationContext,
+    action: CompileAction.CreateBinaryFile,
+) ExecuteError!void {
+    if (ctx.binary_file_map.contains(action.file_path)) {
+        return ExecuteError.DuplicateOutputFile;
+    }
+
+    try ctx.binary_file_map.put(ctx.allocator, action.file_path, .empty);
+    ctx.output_file = action.file_path;
+
+    // TODO: check diagnostics of result
+    _ = try compile(ctx, action.node);
+
+    const file = try std.Io.Dir.cwd().createFile(ctx.io, action.file_path, .{});
+    defer file.close(ctx.io);
+
+    var write_buffer: [8]u8 = undefined;
+    var file_writer = file.writer(ctx.io, &write_buffer);
+    const writer = &file_writer.interface;
+
+    const binary_file_output = ctx.binary_file_map.getPtr(action.file_path).?;
+    try writeBinaryOutput(ctx, binary_file_output, writer);
+}
+
+pub const ExecuteError = error{
+    NodeNotFound,
+    DuplicateOutputFile,
+    DuplicateVirtualNode,
+} || CompileError || std.Io.File.OpenError || std.Io.Writer.Error;

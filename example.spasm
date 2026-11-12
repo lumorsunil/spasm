@@ -21,4 +21,3 @@ main = {
 
 bin virtual 0x0000 variables
 bin "example.bin" emu.cartridge_slot program
-
