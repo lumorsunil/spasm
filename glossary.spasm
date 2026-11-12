@@ -1,0 +1,160 @@
+; adc,and,ora,cmp,sbc
+OP=-+&|=
+a <OP>= 3 ; immediate
+a <OP>= constant ; immediate
+a <OP>= @[constant] ; constant as address
+a <OP>= &@zero.lo ; zero address as immediate
+a <OP>= &@zero.hi ; zero address as immediate
+a <OP>= &@abs.lo ; absolute address lo as immediate
+a <OP>= &@abs.hi ; absolute address hi as immediate
+a <OP>= @zero ; zero
+a <OP>= @zero[x] ; indexed zero x
+a <OP>= @abs ; absolute
+a <OP>= @abs[x] ; indexed absolute x
+a <OP>= @abs[y] ; indexed absolute y
+a <OP>= @zero[x].* ; pre indexed indirect zero x
+a <OP>= @zero.*[y] ; post indexed indirect zero y
+
+; asl
+a <<= 1
+@zero <<= 1
+@zero[x] <<= 1
+@abs <<= 1
+@abs[x] <<= 1
+
+; bcc,bcs,beq,bne,bmi,bpl,bvc,bvs
+FLAG=cznv
+if (<FLAG> == 1) pc = @rel
+if (<FLAG> == 0) pc = @rel
+
+; bit
+a = bit(@zero)
+a = bit(@abs)
+
+; brk
+brk
+
+; clc,cld,cli,clv,sec,sed,sei
+FLAG=cdiv
+<FLAG> = 0
+<FLAG> = 1
+
+; cpx,cpy
+XY=xy
+<XY> == 3 ; immediate
+<XY> == @zero ; zero
+<XY> == @abs ; absolute
+
+; dec
+--@zero
+--@zero[x]
+--@abs
+--@abs[x]
+
+; dex,dey
+--x
+--y
+
+; inc
+++@zero
+++@zero[x]
+++@abs
+++@abs[x]
+
+; inx,iny
+++x
+++y
+
+; jmp
+pc = @abs
+pc = @abs.*
+
+; jsr
+call @abs
+
+; lda
+a = 3 ; immediate
+a = @zero ; zero
+a = @zero[x] ; indexed zero x
+a = @abs ; absolute
+a = @abs[x] ; indexed absolute x
+a = @abs[y] ; indexed absolute y
+a = @zero[x].* ; pre indexed indirect zero x
+a = @zero.*[y] ; post indexed indirect zero y
+
+; ldx
+x = 3
+x = @zero
+x = @zero[y]
+x = @abs
+x = @abs[y]
+
+; ldy
+y = 3
+y = @zero
+y = @zero[x]
+y = @abs
+y = @abs[x]
+
+; lsr
+a >>= 1
+@zero >>= 1
+@zero[x] >>= 1
+@abs >>= 1
+@abs[x] >>= 1
+
+; nop
+nop
+
+; pha,php
+push a
+push flags
+
+; pla,plp
+pop a
+pop flags
+
+; rol
+a <|< 1
+@zero <|< 1
+@zero[x] <|< 1
+@abs <|< 1
+@abs[x] <|< 1
+
+; ror
+a >|> 1
+@zero >|> 1
+@zero[x] >|> 1
+@abs >|> 1
+@abs[x] >|> 1
+
+; rti,rts
+returni
+return
+
+; sta
+@zero = a
+@zero[x] = a
+@abs = a
+@abs[x] = a
+@abs[y] = a
+@zero[x].* = a
+@zero.*[y] = a
+
+; stx
+@zero = x
+@zero[y] = x
+@abs = x
+
+; sty
+@zero = y
+@zero[x] = y
+@abs = y
+
+; tax,tay,tsx,txa,txs,tya
+x = a
+y = a
+x = s
+a = x
+s = x
+a = y

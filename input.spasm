@@ -1,0 +1,28 @@
+emu = import "emu.spasm"
+
+update = {
+    a = emu.input.down.*
+    x = a
+    a &= emu.input.button_up
+    ; if (emu.input.down.* & emu.input.button_up != 0)
+    if (z == 1) pc = +
+    ; then
+    ; button_up is down
+    return
++:
+    ; else
+    ; button_up is not down
+    a = x
+    a &= emu.input.button_left
+    if (z == 1) pc = +
+    ; button_left is down
+    return
++:
+    a = x
+    a &= emu.input.button_down
+    if (z == 1) pc = +
+    ; button_down is down
+    return
++:
+}
+

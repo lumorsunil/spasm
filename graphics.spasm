@@ -1,0 +1,12 @@
+emu = import "emu.spasm"
+
+init = {
+    a = 0
+    emu.gpu.scroll_x.* = a
+    emu.gpu.scroll_y.* = a
+    return
+}
+
+subroutines = {
+    emit init
+}

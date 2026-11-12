@@ -1,0 +1,19 @@
+gpu = {
+    scroll_x: *u8 = 0x1925
+    scroll_y: *u8 = 0x1926
+}
+
+input = {
+    down: *u8 = 0xF000
+    pressed: *u8 = 0xF001
+    released: *u8 = 0xF002
+    button_up: u8 = 0x01
+    button_left: u8 = 0x02
+    button_down: u8 = 0x04
+    button_right: u8 = 0x08
+    button_x: u8 = 0x10
+    button_y: u8 = 0x20
+    button_b: u8 = 0x40
+    button_a: u8 = 0x80
+}
+

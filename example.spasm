@@ -1,0 +1,24 @@
+emu = import "emu.spasm"
+graphics = import "graphics.spasm"
+
+variables = {
+    temp: [3]u8
+    temp2: [3]u8
+}
+
+program = {
+    emit main
+    emit subroutines
+}
+
+subroutines = {
+    emit graphics.subroutines
+}
+
+main = {
+    call graphics.init
+}
+
+bin virtual 0x0000 variables
+bin "example.bin" emu.cartridge_slot program
+
