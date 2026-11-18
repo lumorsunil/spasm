@@ -1,5 +1,6 @@
 const std = @import("std");
 const Stdio = @import("stdio.zig").Stdio;
+const Tokenizer = @import("tokenizer.zig").Tokenizer;
 const processOptions = @import("process-options.zig").processOptions;
 
 pub fn main(init: std.process.Init) !void {
@@ -15,7 +16,7 @@ pub fn main(init: std.process.Init) !void {
     ) orelse std.process.exit(1);
 
     try switch (options.command) {
-        .build => |build| @import("run-build.zig").runBuild(io, allocator, build),
+        .build => |build| @import("run-build.zig").runBuild(io, allocator, &stdio, build),
         .ast_test => @import("ast-test.zig").astTest(io, allocator),
     };
 }

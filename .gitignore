@@ -6,3 +6,5 @@ zig-pkg
 zig-out
 
 *.bin
+
+session.vim

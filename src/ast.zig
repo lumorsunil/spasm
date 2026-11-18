@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Diagnostic = @import("diagnostic.zig").Diagnostic;
 
 pub const Node = struct {
     id: Id,
@@ -8,12 +9,16 @@ pub const Node = struct {
     pub const Id = usize;
 
     pub const Type = union(enum) {
+        expr_u8: ExprU8,
+        expr_u16: ExprU16,
         instruction: Instruction,
         emit: Emit,
         block: Block,
         binary: Binary,
+        string: []const u8,
         identifier: []const u8,
         label: []const u8,
+        declaration: Declaration,
     };
 
     pub const Instruction = union(enum) {
@@ -35,6 +40,17 @@ pub const Node = struct {
         }
     };
 
+    pub const ExprU16 = union(enum) {
+        literal: u16,
+
+        pub fn evaluate(self: @This(), ctx: *CompilationContext) !u16 {
+            _ = ctx;
+            return switch (self) {
+                .literal => |s| s,
+            };
+        }
+    };
+
     pub const Emit = struct {
         node: Id,
     };
@@ -45,7 +61,7 @@ pub const Node = struct {
 
     pub const Binary = struct {
         target: Target,
-        base_address: usize,
+        base_address: Id,
         node: Id,
 
         pub const Target = union(enum) {
@@ -64,7 +80,7 @@ pub const Node = struct {
 pub const CompilationContext = struct {
     io: std.Io,
     allocator: Allocator,
-    node_map: std.AutoHashMapUnmanaged(Node.Id, Node) = .empty,
+    node_map: *std.AutoHashMapUnmanaged(Node.Id, Node),
     binary_file_map: std.StringHashMapUnmanaged(BinaryOutput) = .empty,
     label_map: std.AutoHashMapUnmanaged(Node.Id, usize) = .empty,
     output_file: ?[]const u8 = null,
@@ -97,12 +113,35 @@ pub const CompileAction = union(enum) {
 
     pub const Virtual = struct {
         node: Node.Id,
+
+        pub fn format(
+            self: @This(),
+            writer: *std.Io.Writer,
+        ) std.Io.Writer.Error!void {
+            try writer.print("bin virtual id:{}", .{self.node});
+        }
     };
 
     pub const CreateBinaryFile = struct {
         node: Node.Id,
         file_path: []const u8,
+
+        pub fn format(
+            self: @This(),
+            writer: *std.Io.Writer,
+        ) std.Io.Writer.Error!void {
+            try writer.print("bin {s} id:{}", .{ self.file_path, self.node });
+        }
     };
+
+    pub fn format(
+        self: @This(),
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        switch (self) {
+            inline else => |s| try writer.print("{f}", .{s}),
+        }
+    }
 };
 
 pub const CompilationResult = struct {
@@ -141,7 +180,7 @@ pub fn precompile(
     return switch (node.type) {
         .binary => |binary| precompileBinary(ctx, node, binary),
         .block => |block| precompileBlock(ctx, node, block),
-        .instruction, .identifier, .emit, .label => .empty,
+        .instruction, .identifier, .emit, .label, .expr_u8, .expr_u16, .string, .declaration => .empty,
     };
 }
 
@@ -188,7 +227,10 @@ pub fn compile(
         .binary => |binary| compileBinary(ctx, node, binary),
         .block => |block| compileBlock(ctx, node, block),
         .instruction => |instr| compileInstruction(ctx, node, instr),
-        .emit, .identifier, .label => CompileError.NotYetImplemented,
+        .expr_u8 => |expr_u8| compileExtrU8(ctx, node, expr_u8),
+        .expr_u16 => |expr_u16| compileExtrU16(ctx, node, expr_u16),
+        .emit, .identifier, .label, .declaration => CompileError.NotYetImplemented,
+        .string => CompileError.ComptimeEncountered,
     };
 }
 
@@ -197,6 +239,7 @@ pub fn compileBinary(
     _: Node,
     binary: Node.Binary,
 ) CompileError!CompilationResult {
+    // TODO: take base address into account?
     return try compile(ctx, binary.node);
 }
 
@@ -224,32 +267,42 @@ pub fn compileInstruction(
     return .empty;
 }
 
+pub fn compileExtrU8(
+    ctx: *CompilationContext,
+    _: Node,
+    expr_u8: Node.ExprU8,
+) CompileError!CompilationResult {
+    const bytes = try ctx.allocator.alignedAlloc(u8, null, 1);
+    switch (expr_u8) {
+        .literal => |literal| bytes[0] = literal,
+    }
+    try ctx.appendBinaryOutput(.{ .bytes = bytes });
+    return .empty;
+}
+
+pub fn compileExtrU16(
+    ctx: *CompilationContext,
+    _: Node,
+    expr_u16: Node.ExprU16,
+) CompileError!CompilationResult {
+    const bytes = try ctx.allocator.alignedAlloc(u8, null, 2);
+    switch (expr_u16) {
+        .literal => |literal| {
+            bytes[0] = @intCast(literal & 0x00FF);
+            bytes[1] = @intCast((literal & 0xFF00) >> 8);
+        },
+    }
+    try ctx.appendBinaryOutput(.{ .bytes = bytes });
+    return .empty;
+}
+
 pub const CompileError = error{
     NodeNotFound,
     NotYetImplemented,
     EmitWhileNoOutputFile,
     BinaryOutputFileNotFound,
+    ComptimeEncountered,
 } || std.mem.Allocator.Error;
-
-pub const Diagnostic = struct {
-    severity: Severity,
-    message: []const u8,
-    range: Range,
-
-    pub const Severity = enum { debug, info, warn, err };
-};
-
-pub const Location = struct {
-    uri: []const u8,
-    index: usize,
-    line: usize,
-    column: usize,
-};
-
-pub const Range = struct {
-    start: Location,
-    end: Location,
-};
 
 pub fn writeBinaryOutput(
     ctx: *CompilationContext,

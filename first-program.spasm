@@ -1,0 +1,2 @@
+bin "test.bin" 0 a = 5
+bin "test2.bin" 0 a = 0
