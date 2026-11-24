@@ -1,2 +1,26 @@
-bin "test.bin" 0 a = 5
-bin "test2.bin" 0 a = 0
+main = {
+    a = 5
+    call multiply_by_two
+
+    multiply_by_two = {
+        a <<= 1
+        return
+    } 
+}
+
+program = {
+    emit main
+    emit main.multiply_by_two
+}
+
+program2 = {
+    emit main.multiply_by_two
+    emit main
+}
+
+variables = {
+    temp: u8
+}
+
+bin virtual 0x2000 variables
+bin "test.bin" 0 program

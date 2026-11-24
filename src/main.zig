@@ -8,7 +8,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
 
     var stdio: Stdio = .uninitialized;
-    stdio.init(init.io);
+    try stdio.init(init.io, init.environ_map);
 
     const options = try processOptions(
         .fromArgs(init.arena.allocator(), init.minimal.args),
@@ -17,7 +17,7 @@ pub fn main(init: std.process.Init) !void {
 
     try switch (options.command) {
         .build => |build| @import("run-build.zig").runBuild(io, allocator, &stdio, build),
-        .ast_test => @import("ast-test.zig").astTest(io, allocator),
+        .ast_test => @import("ast-test.zig").astTest(io, allocator, init.environ_map),
     };
 }
 

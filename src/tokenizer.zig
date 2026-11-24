@@ -98,6 +98,8 @@ const TokenizeReader = struct {
     pub const Error = std.Io.Reader.Error || Allocator.Error;
 };
 
+// {{{ TokenizeReader tests
+
 test "TokenizeReader peek empty" {
     const source = "";
     var reader = std.Io.Reader.fixed(source);
@@ -307,6 +309,8 @@ test "TokenizeReader skipWhiteSpace, mark then peekChar" {
     try std.testing.expectFmt("null", "{?c}", .{actual});
 }
 
+// }}}
+
 pub const Tokenizer = struct {
     arena: std.heap.ArenaAllocator,
     reader: TokenizeReader,
@@ -337,6 +341,10 @@ pub const Tokenizer = struct {
 
         return switch (p) {
             '=' => self.mkToken(.equal),
+            '+' => self.mkToken(.plus),
+            '-' => self.mkToken(.minus),
+            '*' => self.mkToken(.star),
+            '/' => self.mkToken(.forward_slash),
             ':' => self.mkToken(.colon),
             '{' => self.mkToken(.open_brace),
             '}' => self.mkToken(.close_brace),
@@ -490,6 +498,10 @@ pub const Token = struct {
     pub const Tag = enum {
         identifier,
         equal,
+        plus,
+        minus,
+        star,
+        forward_slash,
         string,
         open_brace,
         close_brace,
@@ -502,6 +514,7 @@ pub const Token = struct {
     };
 };
 
+// {{{ Tokenizer tests
 test "empty" {
     const source = "";
     var reader = std.Io.Reader.fixed(source);
@@ -624,3 +637,5 @@ test "equal" {
     try std.testing.expectEqualDeep(Location{ .index = 2, .column = 3, .line = 1 }, tok.end);
     try std.testing.expectEqual(.eof, eof.tag);
 }
+
+// }}}

@@ -7,34 +7,7 @@ const Tokenizer = @import("tokenizer.zig").Tokenizer;
 const Token = @import("tokenizer.zig").Token;
 const Diagnostic = @import("diagnostic.zig").Diagnostic;
 const Location = @import("tokenizer.zig").Location;
-
-pub const ReaderContainer = struct {
-    io: std.Io,
-    allocator: Allocator,
-    reader_map: std.StringHashMapUnmanaged(std.Io.File.Reader) = .empty,
-
-    pub fn init(io: std.Io, allocator: Allocator) @This() {
-        return .{ .io = io, .allocator = allocator };
-    }
-
-    pub fn request(self: *@This(), uri: []const u8) Error!*std.Io.File.Reader {
-        if (self.reader_map.getPtr(uri)) |cached| return cached;
-
-        const file = try std.Io.Dir.cwd().openFile(self.io, uri, .{});
-        errdefer file.close(self.io);
-
-        const file_reader = file.reader(self.io, try self.allocator.alloc(u8, 4096));
-        try self.reader_map.put(self.allocator, uri, file_reader);
-        return self.reader_map.getPtr(uri).?;
-    }
-
-    pub fn dispose(self: *@This(), uri: []const u8) void {
-        const entry = self.reader_map.fetchRemove(uri) orelse return;
-        entry.value.file.close(self.io);
-    }
-
-    pub const Error = error{} || std.Io.File.OpenError || Allocator.Error;
-};
+const ReaderContainer = @import("reader-container.zig").ReaderContainer;
 
 pub const Parser = struct {
     allocator: Allocator,
@@ -49,6 +22,8 @@ pub const Parser = struct {
     tokenizer: Tokenizer = undefined,
     peek_buffer: std.ArrayList(Token) = .empty,
     diagnostics: std.ArrayList(Diagnostic) = .empty,
+    marker: Token = undefined,
+    last_token: Token = undefined,
 
     pub fn init(
         allocator: Allocator,
@@ -130,7 +105,26 @@ pub const Parser = struct {
         return try self.mkNode(.{ .block = .{ .children = node_ids } });
     }
 
-    fn parseNode(self: *@This()) Error!?Node {
+    fn parseNode(self: *@This()) Error!Node {
+        try self.crumble("{s}", .{@src().fn_name});
+        self.incBreadcrumbDepth();
+        defer self.decBreadcrumbDepth();
+
+        return self.parseOneOf(.{ parseMultiNode, parseSingleNode });
+    }
+
+    fn parseOneOf(self: *@This(), parsers: anytype) Error!Node {
+        const start = try self.peekToken();
+
+        return inline for (parsers) |parser| {
+            if (try self.tryParse(parser)) |result| break result;
+        } else {
+            try self.reportDiagnostic(.err, start.range(), "expected expression, found: {t}", .{start.tag});
+            return Error.UnexpectedToken;
+        };
+    }
+
+    fn parseSingleNode(self: *@This()) Error!Node {
         try self.crumble("{s}", .{@src().fn_name});
         self.incBreadcrumbDepth();
         defer self.decBreadcrumbDepth();
@@ -138,19 +132,29 @@ pub const Parser = struct {
         if (try self.tryParse(parseInstruction)) |node| return node;
 
         const tok = try self.peekToken();
-        if (tok.tag == .eof) return null;
+        if (tok.tag == .eof) {
+            try self.reportDiagnostic(.err, tok.range(), "expected expression, found eof", .{});
+            return Error.UnexpectedEOF;
+        }
 
         return switch (tok.tag) {
             .identifier => try self.parseIdentifierNode(),
             .number => try self.parseNumberNode(),
             .string => try self.parseStringNode(),
+            .open_brace => try self.parseBlockNode(),
             else => {
                 try self.reportDiagnostic(.err, tok.range(), "expected expression, found: {t}", .{tok.tag});
                 return Error.UnexpectedToken;
-                // try self.skipToNextLine(tok.end.line);
-                // return self.parseNode();
             },
         };
+    }
+
+    fn parseMultiNode(self: *@This()) Error!Node {
+        try self.crumble("{s}", .{@src().fn_name});
+        self.incBreadcrumbDepth();
+        defer self.decBreadcrumbDepth();
+
+        return try self.parseBinaryOperationNode();
     }
 
     fn skipToNextLine(self: *@This(), cur_line: usize) Error!void {
@@ -167,7 +171,11 @@ pub const Parser = struct {
     }
 
     fn tryParse(self: *@This(), f: anytype) !?brk: {
-        const ErrorUnion = (@typeInfo(@TypeOf(f)).@"fn".return_type orelse void);
+        const ErrorUnion = (switch (@typeInfo(@TypeOf(f))) {
+            .@"fn" => |s| s.return_type,
+            .pointer => |s| @typeInfo(s.child).@"fn".return_type,
+            else => @compileError("Invalid input type " ++ @typeName(@TypeOf(f))),
+        }) orelse void;
         break :brk @typeInfo(ErrorUnion).error_union.payload;
     } {
         const snapshot = try self.mkSnapshot();
@@ -188,7 +196,7 @@ pub const Parser = struct {
         const tok = try self.peekToken();
         if (tok.tag == .eof) {
             try self.reportDiagnostic(.err, tok.range(), "expected instruction, found eof", .{});
-            return Error.ExpectedMore;
+            return Error.UnexpectedEOF;
         }
 
         return switch (tok.tag) {
@@ -196,7 +204,7 @@ pub const Parser = struct {
                 _ = try self.nextToken();
                 if (std.mem.eql(u8, tok.lexeme, "a")) {
                     _ = try self.expectTag(.equal);
-                    const value = try self.parseNode() orelse return Error.ExpectedMore;
+                    const value = try self.parseNode();
                     return try self.mkNode(.{ .instruction = .{
                         .lda_immediate = .{ .value = value.type.expr_u8 },
                     } });
@@ -214,10 +222,10 @@ pub const Parser = struct {
         const identifier = try self.expectIdentifier();
 
         if (std.mem.eql(u8, identifier.lexeme, "bin")) {
-            return self.parseBinaryNode();
+            return self.parseBinaryDeclarationNode();
         }
 
-        return Error.UnexpectedToken;
+        return self.mkNode(.{ .identifier = identifier.lexeme });
     }
 
     fn parseNumberNode(self: *@This()) Error!Node {
@@ -246,19 +254,75 @@ pub const Parser = struct {
         return self.mkNode(.{ .string = string });
     }
 
-    fn parseBinaryNode(self: *@This()) Error!Node {
+    fn parseBinaryDeclarationNode(self: *@This()) Error!Node {
         try self.crumble("{s}", .{@src().fn_name});
 
         const tok = try self.nextToken();
 
-        const target: Node.Binary.Target = if (tok.tag == .string) .{ .file = tok.lexeme } else if (tok.tag == .identifier and std.mem.eql(u8, "virtual", tok.lexeme)) .virtual else return Error.UnexpectedToken;
+        const target: Node.BinaryDecl.Target = switch (tok.tag) {
+            .string => .{ .file = (try self.mkStringNode(tok)).id },
+            .identifier => if (std.mem.eql(u8, "virtual", tok.lexeme)) .virtual else return Error.UnexpectedToken,
+            else => return Error.UnexpectedToken,
+        };
 
         self.incBreadcrumbDepth();
-        const base_addr = try self.parseNode() orelse return Error.ExpectedMore;
-        const inner = try self.parseNode() orelse return Error.ExpectedMore;
+        const base_addr = try self.parseNode();
+        const inner = try self.parseNode();
         self.decBreadcrumbDepth();
 
-        return self.mkNode(.{ .binary = .{ .target = target, .base_address = base_addr.id, .node = inner.id } });
+        return self.mkNode(.{ .binary_decl = .{ .target = target, .base_address = base_addr.id, .node = inner.id } });
+    }
+
+    fn parseBinaryOperationNode(self: *@This()) Error!Node {
+        try self.crumble("{s}", .{@src().fn_name});
+        self.incBreadcrumbDepth();
+        defer self.decBreadcrumbDepth();
+
+        return try self._parseBinaryOperation(BinaryOpBinding.min_binding);
+    }
+
+    fn _parseBinaryOperation(self: *@This(), min_binding: usize) Error!Node {
+        try self.crumble("{s}", .{@src().fn_name});
+        self.incBreadcrumbDepth();
+        defer self.decBreadcrumbDepth();
+
+        var lhs = try self.parseSingleNode();
+
+        while (try self.tryParse(expectBinaryOp)) |op| {
+            const bin_op, const binding = BinaryOpBinding.get(op) catch |err| {
+                try self.reportDiagnostic(.err, op.range(), "expected binary operator, found: {t}", .{op.tag});
+                return err;
+            };
+            const lhs_binding, const rhs_binding = binding;
+            if (lhs_binding < min_binding) {
+                break;
+            }
+
+            const rhs = try self._parseBinaryOperation(rhs_binding);
+            lhs = try self.mkNode(.{ .binary_operation = .{
+                .op = bin_op,
+                .lhs = lhs.id,
+                .rhs = rhs.id,
+            } });
+        }
+
+        return lhs;
+    }
+
+    fn parseBlockNode(self: *@This()) Error!Node {
+        try self.crumble("{s}", .{@src().fn_name});
+        self.incBreadcrumbDepth();
+        defer self.decBreadcrumbDepth();
+
+        _ = try self.expectTag(.open_brace);
+
+        const children = try self.parseNodes();
+        const children_ids = try self.allocator.alloc(Node.Id, children.len);
+        for (children_ids, children) |*child_id, child| child_id.* = child.id;
+
+        _ = try self.expectTag(.close_brace);
+
+        return self.mkNode(.{ .block = .{ .children = children_ids } });
     }
 
     fn parseNodes(self: *@This()) Error![]Node {
@@ -268,7 +332,7 @@ pub const Parser = struct {
 
         var nodes: std.ArrayList(Node) = .empty;
 
-        while (try self.parseNode()) |node| {
+        while (try self.tryParse(parseNode)) |node| {
             try nodes.append(self.allocator, node);
         }
 
@@ -276,7 +340,7 @@ pub const Parser = struct {
     }
 
     fn expectTag(self: *@This(), tag: Token.Tag) Error!Token {
-        try self.crumble("{s}", .{@src().fn_name});
+        try self.crumble("{s} ({t})", .{ @src().fn_name, tag });
 
         const tok = try self.nextToken();
         if (tok.tag != tag) return Error.UnexpectedToken;
@@ -311,7 +375,25 @@ pub const Parser = struct {
         try self.crumble("{s}", .{@src().fn_name});
 
         const string = try self.expectTag(.string);
-        return string.lexeme[1 .. string.lexeme.len - 1];
+        return stringTokenValue(string);
+    }
+
+    fn expectBinaryOp(self: *@This()) Error!Token {
+        try self.crumble("{s}", .{@src().fn_name});
+
+        const tok = try self.nextToken();
+
+        return switch (tok.tag) {
+            .equal => tok,
+            else => {
+                try self.reportDiagnostic(.err, tok.range(), "expected binary operator, found: {t}", .{tok.tag});
+                return Error.UnexpectedToken;
+            },
+        };
+    }
+
+    fn stringTokenValue(token: Token) []const u8 {
+        return token.lexeme[1 .. token.lexeme.len - 1];
     }
 
     const Number = struct {
@@ -327,11 +409,14 @@ pub const Parser = struct {
     };
 
     fn mkNode(self: *@This(), node_type: Node.Type) Error!Node {
-        try self.crumble("{s}", .{@src().fn_name});
+        try self.crumble("{s} ({t})", .{ @src().fn_name, node_type });
 
         const node = Node{
+            .uri = self.uri,
             .id = self.node_id,
             .type = node_type,
+            .start = self.marker,
+            .end = self.last_token,
         };
 
         self.node_id += 1;
@@ -339,6 +424,10 @@ pub const Parser = struct {
         try self.node_map.put(self.allocator, node.id, node);
 
         return node;
+    }
+
+    fn mkStringNode(self: *@This(), tok: Token) Error!Node {
+        return self.mkNode(.{ .string = stringTokenValue(tok) });
     }
 
     pub fn mkSnapshot(self: *Parser) !Snapshot {
@@ -353,6 +442,8 @@ pub const Parser = struct {
         tokenizer_cursor: Location,
         peek_buffer: []const Token,
         diagnostics_len: usize,
+        marker: Token,
+        last_token: Token,
 
         pub fn init(allocator: Allocator, target: *Parser) !@This() {
             const file_reader = try target.reader_container.request(target.uri);
@@ -364,6 +455,8 @@ pub const Parser = struct {
                 .tokenizer_cursor = target.tokenizer.reader.cursor,
                 .peek_buffer = try allocator.dupe(Token, target.peek_buffer.items),
                 .diagnostics_len = target.diagnostics.items.len,
+                .marker = target.marker,
+                .last_token = target.last_token,
             };
         }
 
@@ -383,27 +476,97 @@ pub const Parser = struct {
             try file_reader.seekTo(self.reader_offset);
             target.tokenizer.reader.marker = self.tokenizer_marker;
             target.tokenizer.reader.cursor = self.tokenizer_cursor;
+            target.marker = self.marker;
+            target.last_token = self.last_token;
+        }
+    };
+
+    pub const Breadcrumb = struct {
+        label: []const u8,
+        depth: usize,
+
+        const indentation_width = 2;
+
+        pub fn format(
+            self: @This(),
+            writer: *std.Io.Writer,
+        ) std.Io.Writer.Error!void {
+            try writer.splatByteAll(' ', self.depth * indentation_width);
+            try writer.print("{s}", .{self.label});
+        }
+    };
+
+    const binary_op_precedence_list: BinaryOpBinding.PrecedenceList = &.{
+        .init(.left, &.{.assign}),
+        .init(.left, &.{ .add, .subtract }),
+        .init(.left, &.{ .multiply, .divide }),
+    };
+
+    const BinaryOpBinding = struct {
+        const min_binding: usize = 0;
+        const BindingPowers = struct { usize, usize };
+        const PrecedenceList = []const PrecedenceOperators;
+        const PrecedenceOperators = struct {
+            associativity: Associativity,
+            operators: []const Node.BinaryOperation.BinaryOp,
+
+            const Associativity = enum { left, right };
+
+            fn init(
+                associativity: Associativity,
+                operators: []const Node.BinaryOperation.BinaryOp,
+            ) @This() {
+                return .{ .associativity = associativity, .operators = operators };
+            }
+        };
+        const cached_binding_powers = calculateBindingPowers(binary_op_precedence_list);
+
+        fn calculateBindingPowers(
+            precedence_list: PrecedenceList,
+        ) std.EnumArray(Node.BinaryOperation.BinaryOp, BindingPowers) {
+            var map = std.EnumArray(Node.BinaryOperation.BinaryOp, BindingPowers).initUndefined();
+            var cur = min_binding + 1;
+
+            for (precedence_list) |ops| {
+                const min = cur;
+                const max = cur + 1;
+
+                const binding_powers: BindingPowers = switch (ops.associativity) {
+                    .left => .{ max, min },
+                    .right => .{ min, max },
+                };
+
+                for (ops.operators) |op| {
+                    map.set(op, binding_powers);
+                }
+
+                cur += 2;
+            }
+
+            return map;
+        }
+
+        fn get(op_tok: Token) Error!struct { Node.BinaryOperation.BinaryOp, BindingPowers } {
+            const op: Node.BinaryOperation.BinaryOp = switch (op_tok.tag) {
+                .equal => .assign,
+                .plus => .add,
+                .minus => .subtract,
+                .star => .multiply,
+                .forward_slash => .divide,
+                else => return Error.InvalidBinaryOperator,
+            };
+
+            const binding_powers = cached_binding_powers.get(op);
+
+            return .{ op, binding_powers };
         }
     };
 
     pub const Error = error{
         UnexpectedToken,
+        UnexpectedEOF,
         ExpectedMore,
         InvalidNumber,
+        InvalidBinaryOperator,
     } || Allocator.Error || Tokenizer.Error || std.fmt.ParseIntError || ReaderContainer.Error || std.Io.File.SeekError;
-};
-
-pub const Breadcrumb = struct {
-    label: []const u8,
-    depth: usize,
-
-    const indentation_width = 2;
-
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        try writer.splatByteAll(' ', self.depth * indentation_width);
-        try writer.print("{s}", .{self.label});
-    }
 };
