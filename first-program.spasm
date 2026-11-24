@@ -24,3 +24,4 @@ variables = {
 
 bin virtual 0x2000 variables
 bin "test.bin" 0 program
+bin "test2.bin" 0 program2

@@ -37,6 +37,23 @@ const TokenizeReader = struct {
         try self.takeWhile(std.ascii.isWhitespace);
     }
 
+    fn skipToNextLine(self: *@This()) Error!void {
+        try self.takeWhile(isNotNewLine);
+    }
+
+    fn isNotNewLine(c: u8) bool {
+        return c != '\n';
+    }
+
+    fn skipCommentsAndWhiteSpace(self: *@This()) Error!void {
+        while (true) {
+            try self.skipWhiteSpace();
+            const p = try self.peekChar() orelse break;
+            if (p == ';') try self.skipToNextLine() else break;
+        }
+        try self.skipWhiteSpace();
+    }
+
     fn consume(self: *@This(), n: u8) Error![]const u8 {
         const read_source = try self.peek(n);
         self.moveCursor(read_source);
@@ -327,7 +344,7 @@ pub const Tokenizer = struct {
     }
 
     pub fn next(self: *@This()) Error!Token {
-        try self.reader.skipWhiteSpace();
+        try self.reader.skipCommentsAndWhiteSpace();
 
         self.reader.mark();
 
@@ -350,6 +367,7 @@ pub const Tokenizer = struct {
             '}' => self.mkToken(.close_brace),
             '[' => self.mkToken(.open_bracket),
             ']' => self.mkToken(.close_bracket),
+            ';' => self.mkToken(.semicolon),
             else => Error.UnknownToken,
         };
     }
@@ -510,6 +528,7 @@ pub const Token = struct {
         colon,
         number,
         dot,
+        semicolon,
         eof,
     };
 };
